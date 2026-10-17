@@ -844,6 +844,21 @@ async def start_ping_server():
     print(f"🌐 Health server running on port {PING_PORT}")
 
 
+async def self_ping_loop():
+    if not RENDER_URL:
+        print("⚠️  RENDER_EXTERNAL_URL not set — self-ping disabled.")
+        return
+    url = RENDER_URL.rstrip("/") + "/health"
+    print(f"🔁 Self-ping → {url} every {PING_INTERVAL}s")
+    async with aiohttp.ClientSession() as session:
+        while True:
+            await asyncio.sleep(PING_INTERVAL)
+            try:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    print(f"  🏓 Ping → {resp.status}")
+            except Exception as e:
+                print(f"  ⚠️  Ping failed: {e}")
+
 
 # ======================== MAIN ============================
 
