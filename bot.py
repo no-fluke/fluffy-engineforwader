@@ -49,6 +49,7 @@ from db import (
     get_pipelines, add_pipeline, delete_pipeline,
     toggle_pipeline, count_pipelines, close_db,
     MAX_PIPELINES,
+    is_allowed, add_allowed_user, remove_allowed_user, list_allowed_users,
 )
 import listener
 
@@ -61,6 +62,16 @@ if not all([BOT_TOKEN, API_ID, API_HASH]):
     raise RuntimeError("Missing env vars: BOT_TOKEN, TELEGRAM_API_ID, TELEGRAM_API_HASH")
 
 API_ID = int(API_ID)
+
+# OWNER_ID: your personal Telegram user ID (integer).
+# Set this as an environment variable on Render.
+# Only the owner can use /adduser, /removeuser, /listusers.
+# The owner is always allowed regardless of the whitelist.
+_owner_env = os.getenv("OWNER_ID", "")
+OWNER_ID   = str(int(_owner_env)) if _owner_env.strip().lstrip("-").isdigit() else None
+
+if not OWNER_ID:
+    print("⚠️  WARNING: OWNER_ID env var not set — owner commands disabled!")
 
 PING_PORT = int(os.getenv("PORT", "10000"))
 
@@ -79,6 +90,28 @@ LOGIN_PHONE, LOGIN_OTP, LOGIN_2FA = range(3)
 
 # =================== LOGIN STATE =========================
 LOGIN_STATE: dict[str, dict] = {}
+
+
+# ── Auth guards ───────────────────────────────────────────────────
+
+def is_owner(user_id: str) -> bool:
+    """Return True if this user is the bot owner."""
+    return OWNER_ID is not None and user_id == OWNER_ID
+
+
+async def is_authorized(user_id: str) -> bool:
+    """
+    Return True if this user may use the bot.
+    Owner is always authorized; others must be whitelisted by the owner.
+    """
+    if is_owner(user_id):
+        return True
+    return await is_allowed(user_id)
+
+
+async def _deny(update: Update) -> None:
+    """Silent denial — leaks no information to unknown users."""
+    await update.message.reply_text("⛔ You are not authorized to use this bot.")
 
 
 # ── Helpers ───────────────────────────────────────────────────────
@@ -173,6 +206,10 @@ async def _cleanup_login_state(user_id: str):
 # ── /start ────────────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    if not await is_authorized(user_id):
+        await _deny(update)
+        return
     first = update.effective_user.first_name or "there"
     await update.message.reply_text(
         f"👋 *Welcome, {first}!*\n\n"
@@ -197,6 +234,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
+    if not await is_authorized(user_id):
+        await _deny(update)
+        return ConversationHandler.END
     context.user_data.clear()
     await _cleanup_login_state(user_id)
     await update.message.reply_text("❌ Cancelled.")
@@ -207,6 +247,9 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def logout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id  = str(update.effective_user.id)
+    if not await is_authorized(user_id):
+        await _deny(update)
+        return
     user_doc = await get_user(user_id)
     if not user_doc.get("session_string"):
         await update.message.reply_text("❌ You are not logged in.")
@@ -234,6 +277,9 @@ async def logout(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id  = str(update.effective_user.id)
+    if not await is_authorized(user_id):
+        await _deny(update)
+        return
     user_doc = await get_user(user_id)
     if user_doc.get("session_string"):
         try:
@@ -260,6 +306,9 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def login_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id  = str(update.effective_user.id)
+    if not await is_authorized(user_id):
+        await _deny(update)
+        return ConversationHandler.END
     user_doc = await get_user(user_id)
     if user_doc.get("session_string"):
         try:
@@ -418,6 +467,9 @@ async def _finalize_login(
 
 async def addpipeline_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id  = str(update.effective_user.id)
+    if not await is_authorized(user_id):
+        await _deny(update)
+        return ConversationHandler.END
     user_doc = await get_user(user_id)
 
     if not user_doc.get("session_string"):
@@ -738,6 +790,9 @@ def _pipeline_detail_keyboard(pipeline_id: str, is_active: bool) -> InlineKeyboa
 
 async def mypipelines(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id   = str(update.effective_user.id)
+    if not await is_authorized(user_id):
+        await _deny(update)
+        return
     pipelines = await get_pipelines(user_id)
     if not pipelines:
         await update.message.reply_text(
@@ -760,6 +815,9 @@ async def pipelines_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query   = update.callback_query
     await query.answer()
     user_id = str(update.effective_user.id)
+    if not await is_authorized(user_id):
+        await query.edit_message_text("⛔ You are not authorized to use this bot.")
+        return
     data    = query.data
 
     # ── Back to list ──────────────────────────────────────────────
@@ -864,6 +922,116 @@ async def pipelines_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 # ===================== SELF-PING =========================
+
+# ── Owner-only: user management ───────────────────────────────────
+
+async def adduser_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /adduser <user_id>
+    Owner only. Adds a user to the whitelist so they can use the bot.
+    """
+    caller_id = str(update.effective_user.id)
+    if not is_owner(caller_id):
+        await _deny(update)
+        return
+
+    args = context.args
+    if not args or not args[0].lstrip("-").isdigit():
+        await update.message.reply_text(
+            "Usage: `/adduser <telegram_user_id>`\n\n"
+            "Example: `/adduser 123456789`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    target_id = str(int(args[0]))
+    if is_owner(target_id):
+        await update.message.reply_text("ℹ️ That's you (the owner) — always authorized.")
+        return
+
+    added = await add_allowed_user(target_id, added_by=caller_id)
+    if added:
+        await update.message.reply_text(
+            f"✅ User `{target_id}` has been *added* to the whitelist\\.\n\n"
+            f"They can now use all bot commands\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+    else:
+        await update.message.reply_text(
+            f"ℹ️ User `{target_id}` is *already* whitelisted\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+
+
+async def removeuser_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /removeuser <user_id>
+    Owner only. Removes a user from the whitelist.
+    """
+    caller_id = str(update.effective_user.id)
+    if not is_owner(caller_id):
+        await _deny(update)
+        return
+
+    args = context.args
+    if not args or not args[0].lstrip("-").isdigit():
+        await update.message.reply_text(
+            "Usage: `/removeuser <telegram_user_id>`\n\n"
+            "Example: `/removeuser 123456789`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    target_id = str(int(args[0]))
+    if is_owner(target_id):
+        await update.message.reply_text("⚠️ Cannot remove the owner from the whitelist.")
+        return
+
+    removed = await remove_allowed_user(target_id)
+    if removed:
+        await update.message.reply_text(
+            f"✅ User `{target_id}` has been *removed* from the whitelist\\.\n\n"
+            f"They can no longer use the bot\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+    else:
+        await update.message.reply_text(
+            f"ℹ️ User `{target_id}` was not in the whitelist\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+
+
+async def listusers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /listusers
+    Owner only. Lists all whitelisted users.
+    """
+    caller_id = str(update.effective_user.id)
+    if not is_owner(caller_id):
+        await _deny(update)
+        return
+
+    users = await list_allowed_users()
+
+    if not users:
+        await update.message.reply_text(
+            "📋 *Whitelisted Users*\n\n"
+            "No users have been added yet\\.\n\n"
+            "Use `/adduser <id>` to add someone\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+        return
+
+    lines = [f"📋 *Whitelisted Users* \\({len(users)}\\)\n"]
+    for u in users:
+        lines.append(f"• `{u['_id']}`")
+    lines.append(f"\n👑 Owner: `{OWNER_ID}` \\(always authorized\\)")
+
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode=ParseMode.MARKDOWN_V2,
+    )
+
 
 async def health_handler(request):
     return web.Response(text="OK")
@@ -989,6 +1157,11 @@ def main():
     app.add_handler(CommandHandler("logout",       logout))
     app.add_handler(CommandHandler("mypipelines",  mypipelines))
     app.add_handler(CommandHandler("cancel",       cancel))
+
+    # ── Owner-only: whitelist management ───────────────────────────
+    app.add_handler(CommandHandler("adduser",      adduser_cmd))
+    app.add_handler(CommandHandler("removeuser",   removeuser_cmd))
+    app.add_handler(CommandHandler("listusers",    listusers_cmd))
 
     print("🤖 Forwarder bot is running…")
     app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
