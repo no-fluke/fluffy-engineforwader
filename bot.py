@@ -86,6 +86,48 @@ LOGIN_STATE: dict[str, dict] = {}
 def escape_md(text: str) -> str:
     special = r"\_*[]()~`>#+-=|{}.!"
     return re.sub(f"([{re.escape(special)}])", r"\\\1", str(text))
+def _parse_tme_link(text: str):
+    """Extract chat_id_int from a t.me/c/<id>/... link. Returns int or None."""
+    import re
+    m = re.search(r"t\.me/c/(\d+)", text or "")
+    if not m:
+        return None
+    return int(f"-100{m.group(1)}")
+
+
+def _chat_id_from_fwd(msg):
+    """Try every known way to extract a chat_id from a forwarded message. Returns int or None."""
+    fwd_chat = None
+    if hasattr(msg, "forward_origin") and msg.forward_origin:
+        origin   = msg.forward_origin
+        fwd_chat = getattr(origin, "chat", None) or getattr(origin, "sender_chat", None)
+    if fwd_chat is None:
+        fwd_chat = getattr(msg, "forward_from_chat", None)
+    if fwd_chat is None:
+        return None
+    raw_id    = fwd_chat.id
+    chat_type = getattr(fwd_chat, "type", "supergroup")
+    if chat_type in ("channel", "supergroup", "group"):
+        return raw_id if raw_id < 0 else int(f"-100{raw_id}")
+    return raw_id
+
+
+def _chat_title_from_fwd(msg, fallback: str) -> str:
+    fwd_chat = None
+    if hasattr(msg, "forward_origin") and msg.forward_origin:
+        origin   = msg.forward_origin
+        fwd_chat = getattr(origin, "chat", None) or getattr(origin, "sender_chat", None)
+    if fwd_chat is None:
+        fwd_chat = getattr(msg, "forward_from_chat", None)
+    if fwd_chat is None:
+        return fallback
+    return (
+        getattr(fwd_chat, "title", None)
+        or getattr(fwd_chat, "username", None)
+        or fallback
+    )[:60]
+
+
 
 
 async def safe_send(coro, retries: int = 6):
