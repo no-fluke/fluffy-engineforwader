@@ -411,10 +411,13 @@ async def ap_source(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Receive a forwarded message from the source channel."""
     msg = update.message
 
-    # Try telegram's forward_origin first, then legacy forward_from_chat
+    # Try telegram's forward_origin first (Bot API 7+), then legacy forward_from_chat
     fwd_chat = None
     if hasattr(msg, "forward_origin") and msg.forward_origin:
-        fwd_chat = getattr(msg.forward_origin, "chat", None)
+        origin = msg.forward_origin
+        # MessageOriginChannel → origin.chat
+        # MessageOriginChat (supergroup) → origin.sender_chat
+        fwd_chat = getattr(origin, "chat", None) or getattr(origin, "sender_chat", None)
     if fwd_chat is None:
         fwd_chat = getattr(msg, "forward_from_chat", None)
 
@@ -464,7 +467,10 @@ async def ap_destination(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     fwd_chat = None
     if hasattr(msg, "forward_origin") and msg.forward_origin:
-        fwd_chat = getattr(msg.forward_origin, "chat", None)
+        origin = msg.forward_origin
+        # MessageOriginChannel → origin.chat
+        # MessageOriginChat (supergroup) → origin.sender_chat
+        fwd_chat = getattr(origin, "chat", None) or getattr(origin, "sender_chat", None)
     if fwd_chat is None:
         fwd_chat = getattr(msg, "forward_from_chat", None)
 
@@ -926,10 +932,10 @@ def main():
         entry_points=[CommandHandler("addpipeline", addpipeline_start)],
         states={
             AP_SOURCE: [MessageHandler(
-                filters.FORWARDED & ~filters.COMMAND, ap_source
+                filters.ALL & ~filters.COMMAND, ap_source
             )],
             AP_DESTINATION: [MessageHandler(
-                filters.FORWARDED & ~filters.COMMAND, ap_destination
+                filters.ALL & ~filters.COMMAND, ap_destination
             )],
             AP_GENERAL_TOPIC: [MessageHandler(
                 filters.TEXT & ~filters.COMMAND, ap_general_topic
