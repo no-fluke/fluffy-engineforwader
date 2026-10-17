@@ -42,7 +42,7 @@ from telethon.errors import (
     PhoneNumberInvalidError,
     PasswordHashInvalidError,
 )
-from telethon.tl.functions.channels import GetForumTopicsRequest
+from telethon.tl.functions.messages import GetForumTopicsRequest
 
 from db import (
     get_user, set_user_field, set_user_fields,
@@ -62,10 +62,7 @@ if not all([BOT_TOKEN, API_ID, API_HASH]):
 
 API_ID = int(API_ID)
 
-# ===================== RENDER ============================
-RENDER_URL    = os.getenv("RENDER_EXTERNAL_URL", "")
-PING_INTERVAL = 20
-PING_PORT     = int(os.getenv("PORT", "10000"))
+PING_PORT = int(os.getenv("PORT", "10000"))
 
 # =================== CONV STATES =========================
 LOGIN_PHONE, LOGIN_OTP, LOGIN_2FA = range(3)
@@ -846,21 +843,6 @@ async def start_ping_server():
     await site.start()
     print(f"🌐 Health server running on port {PING_PORT}")
 
-
-async def self_ping_loop():
-    if not RENDER_URL:
-        print("⚠️  RENDER_EXTERNAL_URL not set — self-ping disabled.")
-        return
-    url = RENDER_URL.rstrip("/") + "/health"
-    print(f"🔁 Self-ping → {url} every {PING_INTERVAL}s")
-    async with aiohttp.ClientSession() as session:
-        while True:
-            await asyncio.sleep(PING_INTERVAL)
-            try:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                    print(f"  🏓 Ping → {resp.status}")
-            except Exception as e:
-                print(f"  ⚠️  Ping failed: {e}")
 
 
 # ======================== MAIN ============================
