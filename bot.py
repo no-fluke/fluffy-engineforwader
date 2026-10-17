@@ -74,7 +74,8 @@ LOGIN_PHONE, LOGIN_OTP, LOGIN_2FA = range(3)
     AP_VERIFY_ADMIN,
     AP_GENERAL_TOPIC,
     AP_FORMS_TOPIC,
-) = range(5, 10)
+    AP_HAS_TOPICS,
+) = range(5, 11)
 
 # =================== LOGIN STATE =========================
 LOGIN_STATE: dict[str, dict] = {}
@@ -398,9 +399,10 @@ async def addpipeline_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "🔁 *Add Pipeline — Step 1 of 4*\n\n"
-        "Forward any message from your *SOURCE* private channel or group "
-        "to this chat.\n\n"
-        "This lets me detect the channel ID automatically.\n\n"
+        "Tell me your *SOURCE* channel or supergroup — pick either way:\n\n"
+        "• *Forward* any message from it here, OR\n"
+        "• Paste a message link from it "
+        "(e.g. `https://t.me/c/3702621540/621`)\n\n"
         "Or /cancel to abort.",
         parse_mode=ParseMode.MARKDOWN,
     )
@@ -408,52 +410,43 @@ async def addpipeline_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def ap_source(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Receive a forwarded message from the source channel."""
+    """Receive a forwarded message OR a t.me/c/... link from the source channel/group."""
     msg = update.message
+    text = (msg.text or msg.caption or "").strip()
 
-    # Try telegram's forward_origin first (Bot API 7+), then legacy forward_from_chat
-    fwd_chat = None
-    if hasattr(msg, "forward_origin") and msg.forward_origin:
-        origin = msg.forward_origin
-        # MessageOriginChannel → origin.chat
-        # MessageOriginChat (supergroup) → origin.sender_chat
-        fwd_chat = getattr(origin, "chat", None) or getattr(origin, "sender_chat", None)
-    if fwd_chat is None:
-        fwd_chat = getattr(msg, "forward_from_chat", None)
+    # 1. Try to extract from a t.me/c/... link the user pasted
+    chat_id_int = _parse_tme_link(text)
+    title       = f"Chat {abs(chat_id_int)}" if chat_id_int else None
 
-    if fwd_chat is None:
+    # 2. Try forward_origin / forward_from_chat
+    if chat_id_int is None:
+        chat_id_int = _chat_id_from_fwd(msg)
+        if chat_id_int is not None:
+            title = _chat_title_from_fwd(msg, str(chat_id_int))
+
+    if chat_id_int is None:
         await msg.reply_text(
-            "❌ That doesn't look like a forwarded message.\n\n"
-            "Please *forward* a message from your source channel/group.\n\n"
+            "❌ Could not detect the source chat.\n\n"
+            "Please either:\n"
+            "• *Forward* any message from the source channel/group, OR\n"
+            "• Paste a message link from it "
+            "(e.g. `https://t.me/c/3702621540/621`)\n\n"
             "Or /cancel to abort.",
             parse_mode=ParseMode.MARKDOWN,
         )
         return AP_SOURCE
 
-    raw_id    = fwd_chat.id
-    chat_type = fwd_chat.type  # "channel" | "supergroup" | "group"
-
-    if chat_type in ("channel", "supergroup"):
-        abs_str     = str(abs(raw_id))
-        chat_id_int = int("-" + ("100" + abs_str if not abs_str.startswith("100") else abs_str))
-    else:
-        chat_id_int = raw_id
-
-    title = (
-        getattr(fwd_chat, "title", None)
-        or getattr(fwd_chat, "username", None)
-        or str(chat_id_int)
-    )[:60]
-
     context.user_data["source_chat_id"] = chat_id_int
-    context.user_data["source_title"]   = title
+    context.user_data["source_title"]   = title[:60]
 
     await msg.reply_text(
         f"✅ Source set: *{escape_md(title)}*\n`{chat_id_int}`\n\n"
         "━━━━━━━━━━━━━━━━━━\n"
         "🔁 *Add Pipeline — Step 2 of 4*\n\n"
-        "Now forward any message from your *DESTINATION* group "
-        "(the group where I should send messages).\n\n"
+        "Now tell me your *DESTINATION* supergroup — pick either way:\n\n"
+        "• *Forward* any message from it here, OR\n"
+        "• Paste a message link from it "
+        "(e.g. `https://t.me/c/3702621540/621`)\n\n"
         "Make sure I am already an *admin* in that group!\n\n"
         "Or /cancel to abort.",
         parse_mode=ParseMode.MARKDOWN,
@@ -462,44 +455,35 @@ async def ap_source(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def ap_destination(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Receive a forwarded message from the destination group."""
+    """Receive a forwarded message OR a t.me/c/... link from the destination supergroup."""
     msg = update.message
+    text = (msg.text or msg.caption or "").strip()
 
-    fwd_chat = None
-    if hasattr(msg, "forward_origin") and msg.forward_origin:
-        origin = msg.forward_origin
-        # MessageOriginChannel → origin.chat
-        # MessageOriginChat (supergroup) → origin.sender_chat
-        fwd_chat = getattr(origin, "chat", None) or getattr(origin, "sender_chat", None)
-    if fwd_chat is None:
-        fwd_chat = getattr(msg, "forward_from_chat", None)
+    # 1. Try to extract from a t.me/c/... link the user pasted
+    chat_id_int = _parse_tme_link(text)
+    title       = f"Chat {abs(chat_id_int)}" if chat_id_int else None
 
-    if fwd_chat is None:
+    # 2. Try forward_origin / forward_from_chat
+    if chat_id_int is None:
+        chat_id_int = _chat_id_from_fwd(msg)
+        if chat_id_int is not None:
+            title = _chat_title_from_fwd(msg, str(chat_id_int))
+
+    if chat_id_int is None:
         await msg.reply_text(
-            "❌ That doesn't look like a forwarded message.\n\n"
-            "Please *forward* a message from your destination group.\n\n"
+            "❌ Could not detect the destination chat.\n\n"
+            "Please either:\n"
+            "• *Forward* any message from the destination supergroup, OR\n"
+            "• Paste a message link from it "
+            "(e.g. `https://t.me/c/3702621540/621`)\n\n"
+            "Make sure I am already an *admin* in that group!\n\n"
             "Or /cancel to abort.",
             parse_mode=ParseMode.MARKDOWN,
         )
         return AP_DESTINATION
 
-    raw_id    = fwd_chat.id
-    chat_type = fwd_chat.type
-
-    if chat_type in ("channel", "supergroup"):
-        abs_str     = str(abs(raw_id))
-        chat_id_int = int("-" + ("100" + abs_str if not abs_str.startswith("100") else abs_str))
-    else:
-        chat_id_int = raw_id
-
-    title = (
-        getattr(fwd_chat, "title", None)
-        or getattr(fwd_chat, "username", None)
-        or str(chat_id_int)
-    )[:60]
-
     context.user_data["destination_chat_id"] = chat_id_int
-    context.user_data["destination_title"]   = title
+    context.user_data["destination_title"]   = title[:60]
 
     # Verify bot is admin in destination
     await msg.reply_text("🔍 Verifying bot admin status…")
@@ -686,6 +670,10 @@ _PL_PREFIX  = "pl:"      # view a pipeline
 _DEL_PREFIX = "pldel:"   # delete a pipeline
 _TOG_PREFIX = "pltog:"   # toggle pause/resume
 _BACK_CB    = "plback"   # back to list
+
+# /addpipeline inline-button callbacks
+_HAS_TOPICS_YES = "ht:yes"
+_HAS_TOPICS_NO  = "ht:no"
 
 
 def _pipeline_list_keyboard(pipelines: list) -> InlineKeyboardMarkup:
