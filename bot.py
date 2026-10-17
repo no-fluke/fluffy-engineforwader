@@ -73,7 +73,9 @@ OWNER_ID   = str(int(_owner_env)) if _owner_env.strip().lstrip("-").isdigit() el
 if not OWNER_ID:
     print("⚠️  WARNING: OWNER_ID env var not set — owner commands disabled!")
 
-PING_PORT = int(os.getenv("PORT", "10000"))
+PING_PORT     = int(os.getenv("PORT", "10000"))
+RENDER_URL    = os.getenv("RENDER_EXTERNAL_URL", "").strip()
+PING_INTERVAL = int(os.getenv("PING_INTERVAL", "300"))   # seconds; default 5 min
 
 # =================== CONV STATES =========================
 LOGIN_PHONE, LOGIN_OTP, LOGIN_2FA = range(3)
