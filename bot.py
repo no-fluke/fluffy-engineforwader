@@ -75,7 +75,7 @@ if not OWNER_ID:
 
 PING_PORT     = int(os.getenv("PORT", "10000"))
 RENDER_URL    = os.getenv("RENDER_EXTERNAL_URL", "").strip()
-PING_INTERVAL = int(os.getenv("PING_INTERVAL", "300"))   # seconds; default 5 min
+PING_INTERVAL = int(os.getenv("PING_INTERVAL", "30"))   # seconds; default 5 min
 
 # =================== CONV STATES =========================
 LOGIN_PHONE, LOGIN_OTP, LOGIN_2FA = range(3)
