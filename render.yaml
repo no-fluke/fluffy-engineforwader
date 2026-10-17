@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: telegram-forwarder-bot
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter          # use paid plan — free tier sleeps after 15 min
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_API_ID
+        sync: false
+      - key: TELEGRAM_API_HASH
+        sync: false
+      - key: MONGO_URI
+        sync: false
+      - key: MONGO_DB_NAME
+        value: forwarder_bot
+      - key: RENDER_EXTERNAL_URL
+        sync: false        # set this to your Render public URL after first deploy
