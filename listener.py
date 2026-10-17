@@ -50,10 +50,12 @@ async def _build_client(user_id: str) -> TelegramClient | None:
     return client
 
 
-def _make_handler(lookup: dict, bot):
+def _make_handler(lookup: dict, bot, client):
     """
     Return a Telethon NewMessage handler that routes messages
     using the lookup dict: { source_chat_id: pipeline_doc }
+    The already-connected client is passed through so forwarder
+    never needs to open a second session.
     """
     async def _on_message(event):
         chat_id  = event.chat_id
@@ -62,7 +64,7 @@ def _make_handler(lookup: dict, bot):
             return
         # Fire-and-forget so the listener loop is never blocked
         asyncio.create_task(
-            forwarder.handle(bot, event.message, pipeline)
+            forwarder.handle(bot, client, event.message, pipeline)
         )
 
     return _on_message
@@ -105,7 +107,7 @@ async def _run_listener(user_id: str, bot):
         f"{len(source_ids)} source(s): {source_ids}"
     )
 
-    handler = _make_handler(lookup, bot)
+    handler = _make_handler(lookup, bot, client)
     client.add_event_handler(
         handler,
         events.NewMessage(chats=source_ids),
