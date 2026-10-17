@@ -15,10 +15,17 @@ import asyncio
 import io
 import random
 
+from telethon.errors import (
+    FloodWaitError,
+    ChatWriteForbiddenError,
+    UserBannedInChannelError,
+    ChannelPrivateError,
+)
 from telethon.tl.types import MessageMediaWebPage
 
-DELAY_MIN = 3
-DELAY_MAX = 8
+# ── Delay: 1–2 minutes (60–120 seconds) ──────────────────────────
+DELAY_MIN = 60
+DELAY_MAX = 100
 
 GOOGLE_FORMS_DOMAIN = "docs.google.com/forms"
 
@@ -40,15 +47,23 @@ async def handle(bot, client, telethon_message, pipeline: dict):
     telethon_message : Telethon Message object
     pipeline         : pipeline doc from MongoDB
     """
-    # ── 1. Random delay ───────────────────────────────────────────
+    # ── 0. Skip PDFs ─────────────────────────────────────────────
+    media_check = telethon_message.media
+    if media_check and hasattr(media_check, "document"):
+        for attr in getattr(media_check.document, "attributes", []):
+            if hasattr(attr, "file_name") and (attr.file_name or "").lower().endswith(".pdf"):
+                print(f"  ⏭️  msg #{telethon_message.id} is a PDF — skipping")
+                return
+
+    # ── 1. Random delay (1–2 minutes) ────────────────────────────
     delay = random.randint(DELAY_MIN, DELAY_MAX)
     print(
         f"  ⏳  [{pipeline['source_title']}] msg #{telethon_message.id} "
-        f"— waiting {delay}s before forwarding"
+        f"— waiting {delay}s ({delay//60}m {delay%60}s) before forwarding"
     )
     await asyncio.sleep(delay)
 
-    # ── 2. Route ──────────────────────────────────────────────────
+    # ── 2. Route ─────────────────────────────────────────────────
     text        = telethon_message.text or getattr(telethon_message, "caption", "") or ""
     thread_id   = _pick_topic(text, pipeline)
     topic_label = (
@@ -64,7 +79,31 @@ async def handle(bot, client, telethon_message, pipeline: dict):
         f"msg_id={telethon_message.id}"
     )
 
-    # ── 3. Send via the listener's existing client ─────────────────
+    # ── 3. Try native forward first (no re-upload, safer) ────────
+    try:
+        await client.forward_messages(
+            dest_chat_id,
+            telethon_message,
+            reply_to=thread_id,
+        )
+        print(f"  ✅  Forwarded natively to topic '{topic_label}' (thread {thread_id})")
+        return
+
+    except FloodWaitError as e:
+        wait = e.seconds + 10
+        print(f"  ⚠️  FloodWait on forward: Telegram demands {e.seconds}s — sleeping {wait}s")
+        await asyncio.sleep(wait)
+        # Fall through to re-upload fallback after flood wait
+
+    except (ChatWriteForbiddenError, UserBannedInChannelError, ChannelPrivateError) as e:
+        print(f"  ❌  Cannot write to destination ({type(e).__name__}) — skipping")
+        return
+
+    except Exception:
+        # Source restricts forwarding — fall through to download+reupload
+        pass
+
+    # ── 4. Fallback: download → re-upload ────────────────────────
     try:
         media = telethon_message.media
 
@@ -103,7 +142,16 @@ async def handle(bot, client, telethon_message, pipeline: dict):
                 print(f"  ⚠️  msg #{telethon_message.id} has no text and no media — skipping")
                 return
 
-        print(f"  ✅  Delivered to topic '{topic_label}' (thread {thread_id})")
+        print(f"  ✅  Delivered (re-upload) to topic '{topic_label}' (thread {thread_id})")
+
+    except FloodWaitError as e:
+        wait = e.seconds + 10
+        print(f"  ⚠️  FloodWait on send: Telegram demands {e.seconds}s — sleeping {wait}s")
+        await asyncio.sleep(wait)
+        print(f"  ⚠️  msg #{telethon_message.id} dropped after flood wait (will not retry)")
+
+    except (ChatWriteForbiddenError, UserBannedInChannelError) as e:
+        print(f"  ❌  Banned/forbidden in destination ({type(e).__name__}) — skipping msg")
 
     except Exception as e:
         print(
