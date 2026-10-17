@@ -2,8 +2,9 @@
 db.py  –  MongoDB helpers for the Forwarder Bot
 ================================================
 Collections:
-  users     – Telethon session strings + phone
-  pipelines – source → destination + topic mapping (max 20 per user)
+  users         – Telethon session strings + phone
+  pipelines     – source → destination + topic mapping (max 20 per user)
+  allowed_users – user IDs permitted to use the bot (managed by owner)
 """
 
 import os
@@ -43,6 +44,44 @@ async def set_user_fields(user_id: str, fields: dict):
     await get_db().users.update_one(
         {"_id": user_id}, {"$set": fields}, upsert=True
     )
+
+
+# ── Allowed-users helpers (owner-managed whitelist) ───────────────
+
+async def is_allowed(user_id: str) -> bool:
+    """Return True if this user_id is in the whitelist."""
+    doc = await get_db().allowed_users.find_one({"_id": user_id})
+    return doc is not None
+
+
+async def add_allowed_user(user_id: str, added_by: str) -> bool:
+    """
+    Add user_id to the whitelist.
+    Returns True if newly added, False if already present.
+    """
+    existing = await get_db().allowed_users.find_one({"_id": user_id})
+    if existing:
+        return False
+    await get_db().allowed_users.insert_one({
+        "_id":      user_id,
+        "added_by": added_by,
+    })
+    return True
+
+
+async def remove_allowed_user(user_id: str) -> bool:
+    """
+    Remove user_id from the whitelist.
+    Returns True if removed, False if they weren't in the list.
+    """
+    result = await get_db().allowed_users.delete_one({"_id": user_id})
+    return result.deleted_count > 0
+
+
+async def list_allowed_users() -> list[dict]:
+    """Return all whitelisted user docs."""
+    cursor = get_db().allowed_users.find({})
+    return await cursor.to_list(length=None)
 
 
 # ── Pipeline helpers ──────────────────────────────────────────────
