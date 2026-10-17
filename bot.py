@@ -559,7 +559,7 @@ async def ap_destination(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return ConversationHandler.END
 
         result = await client(GetForumTopicsRequest(
-            channel=chat_id_int,
+            peer=chat_id_int,
             offset_date=0,
             offset_id=0,
             offset_topic=0,
