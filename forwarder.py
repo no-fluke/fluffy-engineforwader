@@ -3,8 +3,8 @@ forwarder.py  –  Classify a message and copy it to the correct topic
 =====================================================================
 Called by listener.py for every new message in a source chat.
 
-Uses the SAME Telethon client that the listener already has open —
-no new sessions, no extra logins, no risk to the user account.
+The BOT account does all sending — the user's Telethon client is used
+only to *read* the source channel (which the bot cannot join directly).
 
 Routing logic:
   - Contains "docs.google.com/forms" AND forms_topic_id set → forms topic
@@ -15,15 +15,16 @@ import asyncio
 import io
 import random
 
-from telethon.errors import (
-    FloodWaitError,
-    ChatWriteForbiddenError,
-    UserBannedInChannelError,
-    ChannelPrivateError,
+from telethon.errors import FloodWaitError
+from telethon.tl.types import (
+    MessageMediaPhoto,
+    MessageMediaDocument,
+    MessageMediaWebPage,
 )
-from telethon.tl.types import MessageMediaWebPage
 
-# ── Delay: 1–2 minutes (60–120 seconds) ──────────────────────────
+from telegram.error import RetryAfter, TelegramError
+
+# ── Delay: 60–100 seconds ─────────────────────────────────────────
 DELAY_MIN = 60
 DELAY_MAX = 100
 
@@ -40,26 +41,43 @@ def _pick_topic(message_text: str, pipeline: dict) -> int:
     return pipeline["general_topic_id"]
 
 
+async def _bot_send(coro, retries: int = 5):
+    """Retry wrapper for python-telegram-bot calls."""
+    for attempt in range(retries):
+        try:
+            return await coro
+        except RetryAfter as e:
+            wait = e.retry_after + random.uniform(5, 15)
+            print(f"  ⚠️  Bot rate-limit: sleeping {wait:.1f}s")
+            await asyncio.sleep(wait)
+        except TelegramError as e:
+            if attempt < retries - 1:
+                await asyncio.sleep(2 ** attempt + random.uniform(1, 3))
+            else:
+                raise
+    raise RuntimeError(f"_bot_send failed after {retries} attempts")
+
+
 async def handle(bot, client, telethon_message, pipeline: dict):
     """
-    bot              : python-telegram-bot Bot (unused here, kept for API compat)
-    client           : the already-connected Telethon client from listener.py
+    bot              : python-telegram-bot Bot — does ALL sending
+    client           : the already-connected Telethon client (read-only use)
     telethon_message : Telethon Message object
     pipeline         : pipeline doc from MongoDB
     """
     # ── 0. Skip PDFs ─────────────────────────────────────────────
-    media_check = telethon_message.media
-    if media_check and hasattr(media_check, "document"):
-        for attr in getattr(media_check.document, "attributes", []):
+    media_obj = telethon_message.media
+    if media_obj and hasattr(media_obj, "document"):
+        for attr in getattr(media_obj.document, "attributes", []):
             if hasattr(attr, "file_name") and (attr.file_name or "").lower().endswith(".pdf"):
                 print(f"  ⏭️  msg #{telethon_message.id} is a PDF — skipping")
                 return
 
-    # ── 1. Random delay (1–2 minutes) ────────────────────────────
+    # ── 1. Random delay ───────────────────────────────────────────
     delay = random.randint(DELAY_MIN, DELAY_MAX)
     print(
         f"  ⏳  [{pipeline['source_title']}] msg #{telethon_message.id} "
-        f"— waiting {delay}s ({delay//60}m {delay%60}s) before forwarding"
+        f"— waiting {delay}s before forwarding"
     )
     await asyncio.sleep(delay)
 
@@ -79,82 +97,119 @@ async def handle(bot, client, telethon_message, pipeline: dict):
         f"msg_id={telethon_message.id}"
     )
 
-    # ── 3. Try native forward first (no re-upload, safer) ────────
+    # ── 3. Decide what to send ────────────────────────────────────
+    media = telethon_message.media
+
+    # Web-page previews are auto-generated from the URL — treat as text only
+    if isinstance(media, MessageMediaWebPage):
+        media = None
+
     try:
-        await client.forward_messages(
-            dest_chat_id,
-            telethon_message,
-            reply_to=thread_id,
-        )
-        print(f"  ✅  Forwarded natively to topic '{topic_label}' (thread {thread_id})")
-        return
+        if media is None:
+            # ── Text only ────────────────────────────────────────
+            if not text:
+                print(f"  ⚠️  msg #{telethon_message.id} has no text and no media — skipping")
+                return
+            await _bot_send(
+                bot.send_message(
+                    chat_id=dest_chat_id,
+                    text=text,
+                    message_thread_id=thread_id,
+                )
+            )
 
-    except FloodWaitError as e:
-        wait = e.seconds + 10
-        print(f"  ⚠️  FloodWait on forward: Telegram demands {e.seconds}s — sleeping {wait}s")
-        await asyncio.sleep(wait)
-        # Fall through to re-upload fallback after flood wait
+        elif isinstance(media, MessageMediaPhoto):
+            # ── Photo ────────────────────────────────────────────
+            file_bytes = await client.download_media(media, bytes)
+            await _bot_send(
+                bot.send_photo(
+                    chat_id=dest_chat_id,
+                    photo=io.BytesIO(file_bytes),
+                    caption=text or None,
+                    message_thread_id=thread_id,
+                )
+            )
 
-    except (ChatWriteForbiddenError, UserBannedInChannelError, ChannelPrivateError) as e:
-        print(f"  ❌  Cannot write to destination ({type(e).__name__}) — skipping")
-        return
-
-    except Exception:
-        # Source restricts forwarding — fall through to download+reupload
-        pass
-
-    # ── 4. Fallback: download → re-upload ────────────────────────
-    try:
-        media = telethon_message.media
-
-        # Web-page previews are auto-generated from the URL — skip
-        if isinstance(media, MessageMediaWebPage):
-            media = None
-
-        if media:
+        elif isinstance(media, MessageMediaDocument):
+            # ── Document / video / audio / sticker / gif ─────────
             file_bytes = await client.download_media(media, bytes)
             buf        = io.BytesIO(file_bytes)
 
-            # Preserve original filename for documents
+            # Preserve filename
             filename = None
-            if hasattr(media, "document"):
-                for attr in getattr(media.document, "attributes", []):
-                    if hasattr(attr, "file_name"):
-                        filename = attr.file_name
-                        break
+            for attr in getattr(media.document, "attributes", []):
+                if hasattr(attr, "file_name") and attr.file_name:
+                    filename = attr.file_name
+                    break
             if filename:
                 buf.name = filename
 
-            await client.send_file(
-                dest_chat_id,
-                buf,
-                caption=text or None,
-                reply_to=thread_id,
-            )
-        else:
-            if text:
-                await client.send_message(
-                    dest_chat_id,
-                    text,
-                    reply_to=thread_id,
+            mime = getattr(media.document, "mime_type", "") or ""
+
+            if mime.startswith("video/"):
+                await _bot_send(
+                    bot.send_video(
+                        chat_id=dest_chat_id,
+                        video=buf,
+                        caption=text or None,
+                        message_thread_id=thread_id,
+                    )
+                )
+            elif mime.startswith("audio/"):
+                await _bot_send(
+                    bot.send_audio(
+                        chat_id=dest_chat_id,
+                        audio=buf,
+                        caption=text or None,
+                        message_thread_id=thread_id,
+                    )
                 )
             else:
-                print(f"  ⚠️  msg #{telethon_message.id} has no text and no media — skipping")
+                await _bot_send(
+                    bot.send_document(
+                        chat_id=dest_chat_id,
+                        document=buf,
+                        caption=text or None,
+                        message_thread_id=thread_id,
+                    )
+                )
+
+        else:
+            # ── Unknown media type — fall back to text if available ──
+            if text:
+                await _bot_send(
+                    bot.send_message(
+                        chat_id=dest_chat_id,
+                        text=text,
+                        message_thread_id=thread_id,
+                    )
+                )
+            else:
+                print(f"  ⚠️  msg #{telethon_message.id} unsupported media type — skipping")
                 return
 
-        print(f"  ✅  Delivered (re-upload) to topic '{topic_label}' (thread {thread_id})")
+        print(f"  ✅  Bot delivered to topic '{topic_label}' (thread {thread_id})")
 
-    except FloodWaitError as e:
-        wait = e.seconds + 10
-        print(f"  ⚠️  FloodWait on send: Telegram demands {e.seconds}s — sleeping {wait}s")
+    except RetryAfter as e:
+        wait = e.retry_after + 10
+        print(f"  ⚠️  FloodWait: {e.retry_after}s — sleeping {wait}s then dropping msg")
         await asyncio.sleep(wait)
         print(f"  ⚠️  msg #{telethon_message.id} dropped after flood wait (will not retry)")
 
-    except (ChatWriteForbiddenError, UserBannedInChannelError) as e:
-        print(f"  ❌  Banned/forbidden in destination ({type(e).__name__}) — skipping msg")
+    except TelegramError as e:
+        print(
+            f"  ❌  Bot failed to deliver msg #{telethon_message.id} "
+            f"from {pipeline['source_title']}: {e}"
+        )
+
+    except FloodWaitError as e:
+        wait = e.seconds + 10
+        print(f"  ⚠️  Telethon FloodWait (download): {e.seconds}s — sleeping {wait}s")
+        await asyncio.sleep(wait)
+        print(f"  ⚠️  msg #{telethon_message.id} dropped after flood wait")
 
     except Exception as e:
         print(
-            f"  ❌  Failed to forward msg #{telethon_message.id} "
+            f"  ❌  Unexpected error for msg #{telethon_message.id} "
             f"from {pipeline['source_title']}: {e}"
         )
