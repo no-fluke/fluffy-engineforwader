@@ -25,7 +25,7 @@ API_ID   = int(os.getenv("TELEGRAM_API_ID", "0"))
 API_HASH = os.getenv("TELEGRAM_API_HASH", "")
 
 # ── In-memory registry ────────────────────────────────────────────
-# { user_id: {"client": TelegramClient, "task": asyncio.Task, "lookup": {source_chat_id: pipeline}} }
+# { user_id: {"client": TelegramClient, "task": asyncio.Task, "lookup": {source_chat_id: [pipeline, ...]}} }
 _registry: dict[str, dict] = {}
 
 
@@ -58,14 +58,17 @@ def _make_handler(lookup: dict, bot, client):
     never needs to open a second session.
     """
     async def _on_message(event):
-        chat_id  = event.chat_id
-        pipeline = lookup.get(chat_id)
-        if pipeline is None or not pipeline.get("is_active"):
+        chat_id   = event.chat_id
+        pipelines = lookup.get(chat_id)
+        if not pipelines:
             return
-        # Fire-and-forget so the listener loop is never blocked
-        asyncio.create_task(
-            forwarder.handle(bot, client, event.message, pipeline)
-        )
+        # Fire one task per pipeline — supports multiple destinations from one source
+        for pipeline in pipelines:
+            if not pipeline.get("is_active"):
+                continue
+            asyncio.create_task(
+                forwarder.handle(bot, client, event.message, pipeline)
+            )
 
     return _on_message
 
@@ -96,10 +99,11 @@ async def _run_listener(user_id: str, bot):
     if user_id in _registry:
         _registry[user_id]["client"] = client
 
-    # Build O(1) lookup dict
-    lookup: dict[int, dict] = {
-        p["source_chat_id"]: p for p in active
-    }
+    # Build lookup dict: source_chat_id → list of pipelines
+    # A single source can fan out to multiple destinations
+    lookup: dict[int, list] = {}
+    for p in active:
+        lookup.setdefault(p["source_chat_id"], []).append(p)
 
     source_ids = list(lookup.keys())
     print(
