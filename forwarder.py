@@ -82,7 +82,7 @@ async def handle(bot, client, telethon_message, pipeline: dict):
     await asyncio.sleep(delay)
 
     # ── 2. Route ─────────────────────────────────────────────────
-    text        = telethon_message.text or getattr(telethon_message, "caption", "") or ""
+    text        = telethon_message.message or ""
     thread_id   = _pick_topic(text, pipeline)
     topic_label = (
         pipeline.get("forms_topic_name", "Forms")
