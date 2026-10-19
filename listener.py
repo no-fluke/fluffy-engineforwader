@@ -16,6 +16,12 @@ import asyncio
 import os
 
 from telethon import TelegramClient, events
+from telethon.errors import (
+    AuthKeyUnregisteredError,
+    AuthKeyDuplicatedError,
+    UserDeactivatedBanError,
+    UnauthorizedError,
+)
 from telethon.sessions import StringSession
 
 import forwarder
@@ -23,6 +29,7 @@ from db import get_user, get_pipelines, get_all_active_pipelines, set_user_field
 
 API_ID   = int(os.getenv("TELEGRAM_API_ID", "0"))
 API_HASH = os.getenv("TELEGRAM_API_HASH", "")
+OWNER_ID = os.getenv("OWNER_ID", "")
 
 # ── In-memory registry ────────────────────────────────────────────
 # { user_id: {"client": TelegramClient, "task": asyncio.Task, "lookup": {source_chat_id: [pipeline, ...]}} }
@@ -117,13 +124,65 @@ async def _run_listener(user_id: str, bot):
         events.NewMessage(chats=source_ids),
     )
 
+    async def _keepalive():
+        """Ping Telegram at a random interval between 2–5 days so the session
+        never reaches Telegram's 1-week inactivity cutoff."""
+        import random
+        while True:
+            delay = random.uniform(2 * 24 * 60 * 60, 5 * 24 * 60 * 60)  # 2–5 days in seconds
+            print(f"  [listener] user {user_id}: next keepalive in {delay/3600:.1f}h")
+            await asyncio.sleep(delay)
+            try:
+                await client.get_me()
+                print(f"  [listener] user {user_id}: keepalive ping OK")
+            except Exception as e:
+                print(f"  [listener] user {user_id}: keepalive ping failed: {e}")
+                break
+
+    keepalive_task = asyncio.create_task(_keepalive())
+
     try:
         await client.run_until_disconnected()
     except asyncio.CancelledError:
         pass
+    except (AuthKeyUnregisteredError, AuthKeyDuplicatedError,
+            UserDeactivatedBanError, UnauthorizedError) as e:
+        print(f"  [listener] user {user_id} session expired/revoked: {e}")
+        # Clear the dead session from DB so /status shows logged-out
+        await set_user_field(user_id, "session_string", "")
+        # Notify the user via the bot
+        try:
+            await bot.send_message(
+                chat_id=int(user_id),
+                text=(
+                    "⚠️ *Your Telegram session has expired or been revoked.*\n\n"
+                    "Forwarding has stopped for your pipelines.\n"
+                    "Please use /login to reconnect your account."
+                ),
+                parse_mode="Markdown",
+            )
+        except Exception as notify_err:
+            print(f"  [listener] could not notify user {user_id}: {notify_err}")
+            if OWNER_ID and user_id != OWNER_ID:
+                try:
+                    await bot.send_message(
+                        chat_id=int(OWNER_ID),
+                        text=(
+                            f"⚠️ Session expired for user `{user_id}`.\n"
+                            "They need to /login again but could not be notified."
+                        ),
+                        parse_mode="Markdown",
+                    )
+                except Exception:
+                    pass
     except Exception as e:
         print(f"  [listener] user {user_id} client error: {e}")
     finally:
+        keepalive_task.cancel()
+        try:
+            await keepalive_task
+        except (asyncio.CancelledError, Exception):
+            pass
         try:
             await client.disconnect()
         except Exception:
