@@ -86,8 +86,7 @@ async def _run_listener(user_id: str, bot):
     Builds the client, registers ONE handler for ALL sources,
     then keeps the client connected until cancelled.
     """
-    pipelines = await get_pipelines(user_id)
-    active    = [p for p in pipelines if p.get("is_active")]
+    active = await get_pipelines(user_id, active_only=True)
 
     if not active:
         print(f"  [listener] user {user_id}: no active pipelines — idle")
