@@ -86,9 +86,12 @@ async def list_allowed_users() -> list[dict]:
 
 # ── Pipeline helpers ──────────────────────────────────────────────
 
-async def get_pipelines(user_id: str) -> list:
-    """Return all active pipelines for a user (max 20)."""
-    cursor = get_db().pipelines.find({"user_id": user_id})
+async def get_pipelines(user_id: str, active_only: bool = False) -> list:
+    """Return pipelines for a user. Pass active_only=True to get only active ones."""
+    query = {"user_id": user_id}
+    if active_only:
+        query["is_active"] = True
+    cursor = get_db().pipelines.find(query)
     return await cursor.to_list(length=MAX_PIPELINES)
 
 
